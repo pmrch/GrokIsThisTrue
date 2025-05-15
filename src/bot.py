@@ -1,5 +1,8 @@
-from twitchio.ext import commands
 import os
+import regex as re
+from datetime import datetime
+
+from twitchio.ext import commands
 from dotenv import load_dotenv
 from src.groq_handler import handle_groq_query
 
@@ -25,7 +28,6 @@ class Bot(commands.Bot):
         
         except Exception as e:
             print(f"Loading context was unsuccessful\n{e}")
-                
     
     def __init__(self):
         super().__init__(
@@ -37,21 +39,29 @@ class Bot(commands.Bot):
         # Read system prompt from file
         self.system_prompt = self.load_system_prompt("sysprompt.txt")
         
+        # Define the filename of chatlog 
+        self.chatlog_file = "chat_log.txt"
+        
+        # Make message detection dynamic
+        self.pattern = re.compile(r"@grok(?:ai1)?[, ]*is (?:this|that) true\??", re.IGNORECASE)
+        
         # Error checking
         if not self.system_prompt:
             print("Warning: system prompt is empty. Using a default prompt.")
             self.system_prompt = "You are Grok, a witty and sarcastic AI assistant."
 
-        
-
     async def event_ready(self):
         print(f'Logged in as | {self.nick}')
         print('Bot is ready!')
 
-    async def event_message(self, message):
+    async def event_message(self, message: str):
         if message.echo:
             return
         
-        if "@grok is this true?" in message.content.lower():
-            response = handle_groq_query(system_prompt = self.system_prompt, query = message.content)
+        matching = re.search(pattern = self.pattern, string = message.content.lower())
+        if matching:
+            response = handle_groq_query(system_prompt = self.system_prompt, query = message.content, user_name = message.author.name)
             await message.channel.send(f"Hello @{message.author.name}. {response}")
+        
+        with open(self.chatlog_file, "at", encoding = "utf-8", errors = "ignore") as log:
+            log.write("[" + f"{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}" + "] " + f"{message.author.name}: {message.content}" + '\n')

@@ -9,7 +9,17 @@ load_dotenv()
 # Initialize the Groq client only once
 client = Groq(api_key = os.getenv("GROQ_API_KEY"))
 
-def handle_groq_query(system_prompt: str, query: str) -> str:
+# Predefine character limti
+MAX_TOKENS = 125
+
+def handle_groq_query(system_prompt: str, query: str, user_name: str) -> str:
+    cleaned_query = (
+    f"{query.replace('@grok is this true?', '').strip()}\n\n"
+    f"Context from Neuro:\n{Neuro.strip()}\n\n"
+    f"Grok, is this true?"
+    )
+
+    
     try:
         # Make the API call to Groq's chat completion
         chat_completion = client.chat.completions.create(
@@ -18,10 +28,12 @@ def handle_groq_query(system_prompt: str, query: str) -> str:
                 "content": system_prompt,
             },{
                 "role": "user",
-                "content": query,
+                "content": cleaned_query,
+                "name": user_name,
             }
         ], 
-        model="llama-3.3-70b-versatile",)
+        model="llama-3.3-70b-versatile",
+        max_completion_tokens = MAX_TOKENS)
         
         return f"{chat_completion.choices[0].message.content}"
     
