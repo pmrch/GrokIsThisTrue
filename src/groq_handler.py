@@ -15,7 +15,8 @@ MAX_TOKENS = 125
 def handle_groq_query(system_prompt: str, query: str, user_name: str) -> str:
     cleaned_query = (
     f"{query.replace('@grok is this true?', '').strip()}\n\n"
-    f"Context from Neuro:\n{Neuro.strip()}\n\n"
+    #f"Context from Neuro:\n{Neuro.strip()}\n\n"
+    "My friend said AI are taking over."
     f"Grok, is this true?"
     )
 

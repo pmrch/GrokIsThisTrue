@@ -31,9 +31,9 @@ class Bot(commands.Bot):
     
     def __init__(self):
         super().__init__(
-            token=os.getenv("AccessToken"),
-            prefix='!',
-            initial_channels=["yeetzgaming20"]
+            token = os.getenv("AccessToken"),
+            prefix = '!',
+            initial_channels = ["yeetzgaming20"]
         )
         
         # Read system prompt from file
