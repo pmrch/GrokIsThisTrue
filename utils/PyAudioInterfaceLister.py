@@ -12,5 +12,6 @@ for i in range(0, numdevices):
 p = pyaudio.PyAudio()
 for i in range(p.get_device_count()):
     info = p.get_device_info_by_index(i)
-    print(f"Device {i}: {info['name']} - Input Channels: {info['maxInputChannels']}")
+    print(f"Device {i}: {info['name']} - Input Channels: {info['maxInputChannels']}") if "Voicemeeter Out B2" in info['name'] else 0
 p.terminate()
+

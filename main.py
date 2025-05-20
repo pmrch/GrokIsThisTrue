@@ -1,7 +1,9 @@
 from src.bot import Bot
-# This is the main entry point for the Twitch bot.
 
-async def main():
+bot = Bot()
+bot.run()
+
+'''async def main():
     bot = Bot()
     loop = asyncio.get_running_loop()
     
@@ -14,4 +16,4 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    asyncio.run(main())'''
