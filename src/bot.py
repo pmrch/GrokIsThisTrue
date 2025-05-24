@@ -4,6 +4,8 @@ from datetime import datetime
 
 from twitchio.ext import commands
 from dotenv import load_dotenv
+
+from src.transcriber import start_transcription, get_latest_transcription
 from src.groq_handler import handle_groq_query
 
 # Load Environment values
@@ -53,6 +55,9 @@ class Bot(commands.Bot):
     async def event_ready(self):
         print(f'Logged in as | {self.nick}')
         print('Bot is ready!')
+        
+        # Start transcription process in the background threads
+        start_transcription()
 
     async def event_message(self, message: str):
         if message.echo:
