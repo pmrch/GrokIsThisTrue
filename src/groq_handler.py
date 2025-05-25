@@ -1,8 +1,7 @@
-import os
+import os, re
 
 from dotenv import load_dotenv
 from groq import Groq
-from src.transcriber import start_trnascription, get_latest_transcription as Neuro
 
 # Load Environment values
 load_dotenv()
@@ -14,13 +13,13 @@ client = Groq(api_key = os.getenv("GROQ_API_KEY"))
 MAX_TOKENS = 125
 
 def handle_groq_query(system_prompt: str, query: str, user_name: str) -> str:
-    cleaned_query = (
-    f"{query.replace('@grok is this true?', '').strip()}\n\n"
-    #f"Context from Neuro:\n{Neuro.strip()}\n\n"
-    "My friend said AI are taking over."
-    f"Grok, is this true?"
-    )
+    pattern = re.compile(r"@grok(?:ai1)?[, ]*is (?:this|that) true\??", re.IGNORECASE)
+    match = pattern.search(query)
+    if match:
+        # Remove the matched substring from the query
+        cleaned_query = query.replace(match.group(), "").strip()
 
+    cleaned_query = f"Neuro said {cleaned_query}.\n Is that true?"
     
     try:
         # Make the API call to Groq's chat completion
@@ -40,5 +39,5 @@ def handle_groq_query(system_prompt: str, query: str, user_name: str) -> str:
         return f"{chat_completion.choices[0].message.content}"
     
     except Exception as e:
-        return f"This shit doesn't work.\n{e}"
+        return f"Unexpected error encountered.\n{e}"
     

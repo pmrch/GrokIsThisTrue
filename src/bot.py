@@ -5,7 +5,7 @@ from datetime import datetime
 from twitchio.ext import commands
 from dotenv import load_dotenv
 
-from src.transcriber import start_transcription, get_latest_transcription
+from src.transcriber import Transcriber
 from src.groq_handler import handle_groq_query
 
 # Load Environment values
@@ -30,6 +30,15 @@ class Bot(commands.Bot):
         
         except Exception as e:
             print(f"Loading context was unsuccessful\n{e}")
+    
+    def read_clean_lines(self, filename: str):
+        with open(filename, "rt", encoding="utf-8", errors="ignore") as f:
+            return [line.strip() for line in f if line.strip()]
+    
+    def select_context(self) -> str:
+        os.makedirs("data/logs", exist_ok=True)
+        
+        
     
     def __init__(self):
         super().__init__(
@@ -57,7 +66,8 @@ class Bot(commands.Bot):
         print('Bot is ready!')
         
         # Start transcription process in the background threads
-        start_transcription()
+        self.transcriber = Transcriber
+        self.transcriber.start()
 
     async def event_message(self, message: str):
         if message.echo:
@@ -65,7 +75,8 @@ class Bot(commands.Bot):
         
         matching = re.search(pattern = self.pattern, string = message.content.lower())
         if matching:
-            response = handle_groq_query(system_prompt = self.system_prompt, query = message.content, user_name = message.author.name)
+            self.select_context()
+            response = handle_groq_query(system_prompt = self.system_prompt, query = str(message.content + self.select_context()), user_name = message.author.name)
             await message.channel.send(f"Hello @{message.author.name}. {response}")
         
         with open(self.chatlog_file, "at", encoding = "utf-8", errors = "ignore") as log:

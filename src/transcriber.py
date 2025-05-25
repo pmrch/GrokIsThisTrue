@@ -1,7 +1,7 @@
 import pyaudio, torch, librosa
 import threading, queue, difflib, webrtcvad
 import os, numpy as np
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 from datetime import datetime
 
@@ -13,7 +13,7 @@ class Transcriber:
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 2
         self.RATE = 48000
-        self.RECORD_SECONDS = 15
+        self.RECORD_SECONDS = 30
         self.INPUT_DEVICE_INDEX = self.set_interface_index()
 
         # === Queues and File Setup ===
@@ -25,13 +25,14 @@ class Transcriber:
         
         # === Whisper Initialization ===
         self.whisper_model = WhisperModel("distil-large-v3", device="cuda" if torch.cuda.is_available() else "cpu", 
-                                          compute_type="float16" if torch.cuda.is_available() else "int8")
+                                          compute_type="int8_float16" if torch.cuda.is_available() else "int8")
+        self.batched_model = BatchedInferencePipeline(model=self.whisper_model)
         
         # Set up deduplication
         self.prev_transcription = ""
         
         # Allow overlaps
-        self.OVERLAP_SECONDS = 2  # seconds of overlap
+        self.OVERLAP_SECONDS = 5  # seconds of overlap
         self.last_frames = []
         
         # === Set up VAD ===
@@ -51,11 +52,25 @@ class Transcriber:
         raise RuntimeError("Voicemeeter device not found")
 
     def dedupe_overlap(self, prev_text, new_text) -> str:
-        matcher = difflib.SequenceMatcher(None, prev_text, new_text)
-        match = matcher.find_longest_match(0, len(prev_text), 0, len(new_text))
+        if not prev_text:
+            return new_text
+    
+        # Estimate overlap region (first 5 seconds of new_text, last 5 seconds of prev_text)
+        overlap_duration = self.OVERLAP_SECONDS
+        words_per_sec = 2.5  # Approx. words per second in speech
+        overlap_words = int(overlap_duration * words_per_sec)
         
-        if match.size > 20 and match.b + match.size < len(new_text):
-            return new_text[match.b + match.size:].strip()
+        # Split texts into words
+        prev_words = prev_text.split()[-overlap_words:]  # Last words of prev_text
+        new_words = new_text.split()[:overlap_words]     # First words of new_text
+        
+        # Compare overlap regions
+        matcher = difflib.SequenceMatcher(None, ' '.join(prev_words), ' '.join(new_words))
+        match = matcher.find_longest_match(0, len(' '.join(prev_words)), 0, len(' '.join(new_words)))
+        
+        # If significant overlap, remove the duplicated portion
+        if match.size > 5:  # Lower threshold for word-level match
+            return ' '.join(new_text.split()[match.b + match.size:]).strip()
         return new_text
         
     def vad_detect(self, audio_int16, sample_rate=16000, frame_duration_ms=20):
@@ -72,48 +87,36 @@ class Transcriber:
         
         return False
         
-    def fix_punctuation(self, text):
+    def fix_punctuation(self, text, style="clean"):
         import re
-        
+
         text = text.strip()
 
-        # Fix broken interjections like 'Ah.', 'Friggin.' -> 'Ah!' or 'Friggin...'
-        text = re.sub(r"\b(Ah|Oh|Friggin|Ugh)\.(\s|$)", r"\1... ", text)
+        if style == "clean":
+            # Remove space before punctuation
+            text = re.sub(r"\s+([.,!?])", r"\1", text)
+            # Collapse all whitespace
+            text = re.sub(r"\s+", " ", text)
+            # Capitalize after punctuation
+            text = re.sub(r"([.!?])\s+([a-z])", lambda m: f"{m.group(1)} {m.group(2).upper()}", text)
+            # Add final punctuation if needed
+            if text and text[-1] not in ".!?":
+                text += "."
 
-        # Fix 'Cause' at beginning of sentence -> 'Because'
-        text = re.sub(r"^(Cause|cause)\b", "Because", text)
+        elif style == "chaotic":
+            # Preserve filler words and stutters like "um", "uh", "ah"
+            text = re.sub(r"\b([Uu]m|[Uu]h|[Aa]h)\b", r"\1", text)
+            # Keep repeating words like "stop panicking" x5
+            text = re.sub(r"\s+", " ", text)
+            # Loose capitalization, don't overcorrect
+            if text and text[0].islower():
+                text = text[0].upper() + text[1:]
+            if text and text[-1] not in ".!?":
+                text += "..."
 
-        # Collapse repeated words like "drip. drip drip"
-        text = re.sub(r"\b(\w+)\.\s+\1\s+\1\b", r"\1, \1, \1", text)
-
-        # Capitalize after punctuation if needed
-        text = re.sub(r"([.!?])\s+([a-z])", lambda m: f"{m.group(1)} {m.group(2).upper()}", text)
-
-        # Fix random "I." becoming ellipses or misread
-        text = re.sub(r"\b[Ii]\.\s+", "I... ", text)
-
-        # Clean up filler exclamations and emphasize naturally
-        text = re.sub(r"\b(dude|wow|yeah|okay|sure)\b", lambda m: m.group(1).capitalize(), text, flags=re.IGNORECASE)
-        text = re.sub(r"\b(Dude|Wow|Yeah|Okay|Sure)[.!]*", r"\1!", text)
-
-        # Remove unnecessary spaces before punctuation
-        text = re.sub(r"\s+([.,!?])", r"\1", text)
-
-        # Remove excess spacing
-        text = re.sub(r"\s+", " ", text)
-
-        # Sponsor formatting (non-intrusive way)
-        text = re.sub(r"(check out.*(description|sponsor).*)", "[sponsor segment]", text, flags=re.IGNORECASE)
-        
-        # Fix awkward 'I' edge cases
-        text = re.sub(r"\b[Ii]\.(\s+|$)", "I... ", text)
-
-        # End with punctuation if missing
-        if text and text[-1] not in ".!?":
-            text += "."
-            
-        if len(text.split()) <= 2:
-            text = f"[fragment] {text}"
+        elif style == "minimal":
+            # Just remove extra spaces
+            text = re.sub(r"\s+", " ", text)
 
         return text
     
@@ -126,32 +129,18 @@ class Transcriber:
             if not line:
                 continue
 
-            # Detect timestamps
+            # Extract timestamp and text
             if len(line) >= 10 and line[0] == "[" and line[9] == "]":
-                # Line starts with a timestamp
-                line_text = line[10:].strip()
-
                 if buffer:
                     merged.append(self.fix_punctuation(buffer.strip()))
-                buffer = line_text
+                buffer = line[10:].strip()
             else:
-                # It's a continuation
-                if line[0].islower() or line[0] in ",.;":
-                    buffer += " " + line
-                else:
-                    # Unexpected new sentence start – still merge conservatively
-                    buffer += " " + line
+                buffer += " " + line
 
         if buffer:
             merged.append(self.fix_punctuation(buffer.strip()))
             
-        # Remove adjacent duplicates
-        deduped = [merged[0]] if merged else []
-        for line in merged[:1]:
-            if line != deduped[-1]:
-                deduped.append(line)
-                
-        return deduped
+        return merged
     
     def start(self):
         threading.Thread(target=self._record_audio, daemon=True).start()
@@ -204,26 +193,30 @@ class Transcriber:
                 # Convert stereo to mono
                 audio_np = np.frombuffer(audio_data, dtype=np.int16)
                 if self.CHANNELS == 2:
-                    audio_np = audio_np.reshape(-1, 2).mean(axis=1)
+                    audio_np = audio_np.reshape(-1, 2)[:, 0]
                     
-                # Normalize and resample to 16KHz
+                # Normalize audio volume to avoid clipping and resample to 16KHz
                 audio_float = audio_np.astype(np.float32) / 32768.0
+                audio_float = np.clip(audio_float / np.max(np.abs(audio_float)), -1.0, 1.0) # Normalize
                 audio_resampled = librosa.resample(audio_float, orig_sr = self.RATE, target_sr = 16000.0)
-                
-                # Prepare for VAD
-                audio_int16_16k = (audio_resampled * 32768).astype(np.int16)
-                
-                if not self.vad_detect(audio_int16_16k, sample_rate=16000):
-                    # No speech detected, skip transcription
-                    continue
                 
                 # Whisper expects numpy array or torch tensor
                 try:
-                    segments, _ = self.whisper_model.transcribe(audio_resampled, vad_filter=True)
+                    segments, _ = self.batched_model.transcribe(
+                        audio_resampled, vad_filter=True, 
+                        batch_size=8,vad_parameters=dict(threshold=0.5)
+                    )
                     
-                    raw_lines = [f"[{timestamp.strftime('%H:%M:%S')}] {seg.text.strip()}" for seg in segments]
+                    # Filter segments to exclude overlap region (first 5 seconds of new chunk)
+                    overlap_duration = self.OVERLAP_SECONDS
+                    raw_lines = [
+                        f"[{timestamp.strftime('%H:%M:%S')}] {seg.text.strip()}" 
+                        for seg in segments if seg.start >= overlap_duration or seg.end <= self.RECORD_SECONDS
+                    ]
+                    
+                   
                     cleaned_text = self.clean_and_merge_transcript_lines(raw_lines)
-                    new_text = " ".join([line for line in cleaned_text]).strip()
+                    new_text = " ".join(cleaned_text).strip()
                     
                     if new_text:
                         # Deduplicate overlapping text
@@ -235,10 +228,15 @@ class Transcriber:
                             os.makedirs("data", exist_ok=True)
                         
                             with open("data/transcription.txt", "at", encoding = 'utf-8', errors = 'ignore') as file:
-                                file.write(f"[{timestamp.strftime('%H:%M:%S')}] {deduped_text}\n")
+                                file.write(f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {deduped_text}\n")
+                
+                except RuntimeError as e:
+                    print(f"Transcription error: \n{e}")
+                    if "CUDA out of memory" in str(e):
+                        print("CUDA memory error. Try reducing batch_size or using a smaller model.")
                         
                 except Exception as e:
-                    print(f"Whisper error \n{e}")
+                    print(f"Unexpected error \n{e}")
 
     # Get latest transcription within time window
     def get_latest_transcription(self, max_age_seconds=30):
