@@ -101,6 +101,7 @@ class Transcriber:
                     # Load audio file and convert to 16kHz mono
                     audio, sr = librosa.load(audio_path, sr=16000, mono=True)
                     self.register_speaker(speaker, audio)
+                    
                 except Exception as e:
                     print(f"Failed to load speaker sample for {speaker}: {e}")
                     
