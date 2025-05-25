@@ -15,7 +15,6 @@ load_dotenv()
 
 # Initialize the Bot
 class Bot(commands.Bot):
-    
     def load_system_prompt(self, filename: str):
         try:
             with open(filename, "rt", encoding = 'utf-8', errors='ignore') as file:
@@ -36,8 +35,8 @@ class Bot(commands.Bot):
     async def select_context(self):
         os.makedirs("data/logs", exist_ok=True)
 
-        file1_lines = await load_file_lines_async("data/transcript.txt")
-        file2_lines = await load_file_lines_async("data/logs/chat_log.txt")
+        file1_lines = await load_file_lines_async(str("data/transcript.txt"))
+        file2_lines = await load_file_lines_async(str("data/logs/chat_log.txt"))
 
         base_ts, _, base_line = find_line_by_pattern(file2_lines, self.pattern)
 
@@ -65,14 +64,14 @@ class Bot(commands.Bot):
         super().__init__(
             token = os.getenv("AccessToken", ""),
             prefix = '!',
-            initial_channels = ["yeetzgaming20"]
+            initial_channels = ["yeetzgaming20", "vedal987"]
         )
         
         # Read system prompt from file
         self.system_prompt = self.load_system_prompt("data/sysprompt.txt")
         
         # Define the filename of chatlog 
-        self.chatlog_file = "data/chat_log.txt"
+        self.chatlog_file = "data/logs/chat_log.txt"
         
         # Make message detection dynamic
         self.pattern = re.compile(r"@grok(?:ai1)?[, ]*is (?:this|that) true\??", re.IGNORECASE)
@@ -101,7 +100,7 @@ class Bot(commands.Bot):
             context_str = f"{base_line or ''}\n{closest_line or ''}"
             response = handle_groq_query(
                 system_prompt = str(self.system_prompt), 
-                query = f"Question: {str(message.content)}\nContext: {str(context_str)}", 
+                query = f"Context: {str(context_str)}\nQuestion: {str(message.content)}\n", 
                 user_name = str(message.author.name)
             )
             await message.channel.send(f"Hello @{message.author.name}. {response}")

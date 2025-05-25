@@ -1,13 +1,36 @@
-import pyaudio, torch, librosa
-import threading, queue, difflib, webrtcvad
-import os, numpy as np
+# -*- coding: utf-8 -*-
+import pyaudio, librosa, numpy as np
+import torch, torch.nn.functional as F
+import threading, queue, difflib, os, re
+import warnings, speechbrain as sb
+
+from typing import Dict, Optional, Union, List, Tuple
 from faster_whisper import WhisperModel, BatchedInferencePipeline
-
+from dotenv import load_dotenv
+from pyannote.audio import Pipeline
 from datetime import datetime
+from speechbrain.inference import EncoderClassifier  # Updated import path
+from speechbrain.utils.fetching import LocalStrategy
 
+# Suppress specific warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="speechbrain")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.cuda.amp")
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio.models.blocks.pooling")
 
 class Transcriber:
     def __init__(self):
+        # Load Environment variables
+        load_dotenv()
+        
+        # Fix warnings
+        warnings.filterwarnings("ignore", category=UserWarning, module="speechbrain")
+        huggingface_token = os.getenv("HuggingFaceToken")
+        
+        if not huggingface_token:
+            raise ValueError("HuggingFaceToken not found in .env file.")
+        
+        sb.utils.fetching.fetch_strategy = LocalStrategy.COPY # type: ignore
+        
         # === Audio Config ===
         self.CHUNK = 960
         self.FORMAT = pyaudio.paInt16
@@ -28,17 +51,59 @@ class Transcriber:
                                           compute_type="int8_float16" if torch.cuda.is_available() else "int8")
         self.batched_model = BatchedInferencePipeline(model=self.whisper_model)
         
-        # Set up deduplication
+        # === Diarization Initialization ===
+        self.diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=str(os.getenv("HuggingFaceToken")))
+        self.prev_transcription_speaker = None
+        
+        # === Set up deduplication ===
         self.prev_transcription = ""
         
-        # Allow overlaps
+        # === Allow overlaps ===
         self.OVERLAP_SECONDS = 5  # seconds of overlap
         self.last_frames = []
         
-        # === Set up VAD ===
-        self.vad = webrtcvad.Vad(2)  # Aggressiveness: 0-3, 2 is balanced
+        # === Speaker Recognition Initialization ===
+        try:
+            self.speaker_recognizer = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                savedir="pretrained_models/spkrec-ecapa-voxceleb",
+                run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
+            )
+        except Exception as e:
+            print(f"Failed to initialize speaker recognition: {e}")
+            self.speaker_recognizer = None
         
-
+        # === Speaker Embeddings Storage ===
+        self.speaker_embeddings: Dict[str, Optional[torch.Tensor]] = {
+            "Neuro": None,
+            "Filian": None,
+            "Vedal": None
+        }
+        
+        # Try to load speaker samples if they exist
+        self.load_speaker_samples()
+        
+    def load_speaker_samples(self) -> None:
+        """Load and register speaker samples from the data/speaker_samples directory"""
+        samples_dir = os.path.join("data", "speaker_samples")
+        os.makedirs(samples_dir, exist_ok=True)
+        
+        speakers = {
+            "Neuro": "neuro_sample.wav",
+            "Filian": "filian_sample.wav",
+            "Vedal": "vedal_sample.wav"
+        }
+        
+        for speaker, filename in speakers.items():
+            audio_path = os.path.join(samples_dir, filename)
+            if os.path.exists(audio_path):
+                try:
+                    # Load audio file and convert to 16kHz mono
+                    audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+                    self.register_speaker(speaker, audio)
+                except Exception as e:
+                    print(f"Failed to load speaker sample for {speaker}: {e}")
+                    
     # === Device Selection ===
     def set_interface_index(self) -> int:
         p = pyaudio.PyAudio()
@@ -51,7 +116,7 @@ class Transcriber:
         p.terminate()
         raise RuntimeError("Voicemeeter device not found")
 
-    def dedupe_overlap(self, prev_text, new_text) -> str:
+    def dedupe_overlap(self, prev_text: str, new_text: str, prev_speaker=None, new_speaker=None) -> str:
         if not prev_text:
             return new_text
     
@@ -69,23 +134,9 @@ class Transcriber:
         match = matcher.find_longest_match(0, len(' '.join(prev_words)), 0, len(' '.join(new_words)))
         
         # If significant overlap, remove the duplicated portion
-        if match.size > 5:  # Lower threshold for word-level match
+        if match.size > 5 and prev_speaker == new_speaker:  # Lower threshold for word-level match
             return ' '.join(new_text.split()[match.b + match.size:]).strip()
         return new_text
-        
-    def vad_detect(self, audio_int16, sample_rate=16000, frame_duration_ms=20):
-        n = int(sample_rate * frame_duration_ms / 1000)
-        
-        offset = 0
-        while offset + n <= len(audio_int16):
-            frame = audio_int16[offset:offset + n]
-            frame_bytes = frame.tobytes()
-            
-            if self.vad.is_speech(frame_bytes, sample_rate):
-                return True
-            offset += n
-        
-        return False
         
     def fix_punctuation(self, text, style="clean"):
         import re
@@ -120,11 +171,12 @@ class Transcriber:
 
         return text
     
-    def clean_and_merge_transcript_lines(self, lines):
+    def clean_and_merge_transcript_lines(self, lines, diarization_results):
         merged = []
         buffer = ""
+        current_speaker = None
 
-        for line in lines:
+        for line, (start, end, speaker) in zip(lines, diarization_results):
             line = line.strip()
             if not line:
                 continue
@@ -132,15 +184,23 @@ class Transcriber:
             # Extract timestamp and text
             if len(line) >= 10 and line[0] == "[" and line[9] == "]":
                 if buffer:
-                    merged.append(self.fix_punctuation(buffer.strip()))
+                    merged.append((self.fix_punctuation(buffer.strip()), current_speaker))
                 buffer = line[10:].strip()
+                current_speaker = speaker
             else:
                 buffer += " " + line
 
         if buffer:
-            merged.append(self.fix_punctuation(buffer.strip()))
+            merged.append((self.fix_punctuation(buffer.strip()), current_speaker))
+
+        # Format lines with speaker names
+        formatted = []
+        for text, speaker in merged:
+            if text:
+                speaker_name = f"[{speaker}]" if speaker and speaker != "Unknown" else ""
+                formatted.append((f"{speaker_name} {text}".strip(), speaker))
             
-        return merged
+        return formatted
     
     def start(self):
         threading.Thread(target=self._record_audio, daemon=True).start()
@@ -197,39 +257,84 @@ class Transcriber:
                     
                 # Normalize audio volume to avoid clipping and resample to 16KHz
                 audio_float = audio_np.astype(np.float32) / 32768.0
-                audio_float = np.clip(audio_float / np.max(np.abs(audio_float)), -1.0, 1.0) # Normalize
-                audio_resampled = librosa.resample(audio_float, orig_sr = self.RATE, target_sr = 16000.0)
+                audio_float = np.clip(audio_float / np.max(np.abs(audio_float) + 1e-10), -1.0, 1.0)
+                audio_resampled = librosa.resample(audio_float, orig_sr=self.RATE, target_sr=16000.0)
+                
+                # Perform diarization
+                try:
+                    diarization = self.diarization_pipeline({
+                        "waveform": torch.tensor(audio_float, dtype=torch.float32).unsqueeze(0), 
+                        "sample_rate": self.RATE}, min_speakers=1, max_speakers=5)
+                    diarization_results = [(turn.start, turn.end, speaker) for turn, _, speaker in diarization.itertracks(yield_label=True)]
+                    
+                except Exception as e:
+                    print(f"Diarization error: {e}")
+                    diarization_results = []
                 
                 # Whisper expects numpy array or torch tensor
                 try:
                     segments, _ = self.batched_model.transcribe(
-                        audio_resampled, vad_filter=True, 
-                        batch_size=8,vad_parameters=dict(threshold=0.5)
+                        audio_resampled, 
+                        vad_filter=True, 
+                        batch_size=4,
+                        vad_parameters=dict(threshold=0.8, min_silence_duration_ms=500)
                     )
                     
-                    # Filter segments to exclude overlap region (first 5 seconds of new chunk)
-                    overlap_duration = self.OVERLAP_SECONDS
-                    raw_lines = [
-                        f"[{timestamp.strftime('%H:%M:%S')}] {seg.text.strip()}" 
-                        for seg in segments if seg.start >= overlap_duration or seg.end <= self.RECORD_SECONDS
-                    ]
+                    # Align transcription with diarization
+                    raw_lines = []
+                    seen_texts = set()  # Track unique texts to avoid duplicates
                     
-                   
-                    cleaned_text = self.clean_and_merge_transcript_lines(raw_lines)
-                    new_text = " ".join(cleaned_text).strip()
+                    for seg in segments:
+                        if seg.text.strip():
+                            # Get audio segment
+                            start_sample = int(seg.start * 16000)
+                            end_sample = int(seg.end * 16000)
+                            segment_audio = audio_resampled[start_sample:end_sample]
+                            
+                            # Get speaker embedding
+                            embedding = self.compute_speaker_embedding(segment_audio)
+                            speaker = self.match_speaker(embedding)
+                            
+                            # Use the matched speaker instead of diarization speaker
+                            text = seg.text.strip()
+                            if text in seen_texts:
+                                continue
+                            seen_texts.add(text)
+                            
+                            raw_lines.append((
+                                f"[{timestamp.strftime('%H:%M:%S')}] {text}",
+                                (seg.start, seg.end, speaker)
+                            ))
+                                
+                    cleaned_lines = self.clean_and_merge_transcript_lines(
+                        [line for line, _ in raw_lines],
+                        [di for _, di in raw_lines]
+                    )
+                    formatted_lines = []
+                    deduped_text = str()
                     
-                    if new_text:
-                        # Deduplicate overlapping text
-                        deduped_text = self.dedupe_overlap(self.prev_transcription, new_text)
-                        self.prev_transcription = new_text
-                        
+                    for text, speaker in cleaned_lines:
+                        if text:
+                            deduped_text = self.dedupe_overlap(
+                                self.prev_transcription,
+                                text,
+                                prev_speaker=self.prev_transcription_speaker,
+                                new_speaker=speaker
+                            )
                         if deduped_text.strip():
-                            self.transcription_queue.put((timestamp, deduped_text))
-                            os.makedirs("data", exist_ok=True)
+                            self.prev_transcription = text
+                            self.prev_transcription_speaker = speaker
+                            speaker_prefix = f"[{speaker}]" if speaker and speaker != "Unknown" else ""
+                            formatted_line = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {speaker_prefix} {deduped_text}"
+                            formatted_lines.append(formatted_line)
+                            
+                    if formatted_lines:
+                        self.transcription_queue.put((timestamp, "\n".join(formatted_lines)))
+                        os.makedirs("data", exist_ok=True)
                         
-                            with open("data/transcription.txt", "at", encoding = 'utf-8', errors = 'ignore') as file:
-                                file.write(f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {deduped_text}\n")
-                
+                        with open("data/transcription.txt", "at", encoding="utf-8", errors="ignore") as file:
+                            file.write("\n".join(formatted_lines) + "\n")
+                            
                 except RuntimeError as e:
                     print(f"Transcription error: \n{e}")
                     if "CUDA out of memory" in str(e):
@@ -247,3 +352,54 @@ class Transcriber:
                 return text
             self.transcription_queue.get()
         return ""
+    
+    def compute_speaker_embedding(self, audio_array: np.ndarray, sample_rate: int = 16000) -> Optional[torch.Tensor]:
+        if self.speaker_recognizer is None:
+            print("Speaker recognition not available")
+            return None
+            
+        with torch.no_grad():
+            try:
+                # Ensure audio is long enough to avoid std() warning
+                min_samples = int(sample_rate * 0.5)  # At least 0.5 seconds
+                if len(audio_array) < min_samples:
+                    padded_audio = np.pad(audio_array, (0, min_samples - len(audio_array)))
+                    audio_array = padded_audio
+
+                embeddings = self.speaker_recognizer.encode_batch(torch.tensor(audio_array).unsqueeze(0))
+                return F.normalize(embeddings, dim=2)
+            except Exception as e:
+                print(f"Error computing speaker embedding: {e}")
+                return None
+    
+    def match_speaker(self, embedding: Optional[torch.Tensor]) -> str:
+        if embedding is None or not any(self.speaker_embeddings.values()):
+            return "Unknown"
+        
+        max_similarity = -1
+        matched_speaker = "Unknown"
+        
+        for speaker, stored_embedding in self.speaker_embeddings.items():
+            if stored_embedding is not None:
+                similarity = F.cosine_similarity(embedding, stored_embedding)
+                if similarity > max_similarity and similarity > 0.75:  # Threshold
+                    max_similarity = similarity
+                    matched_speaker = speaker
+                    
+        return matched_speaker
+    
+    def register_speaker(self, name: str, audio_sample: np.ndarray) -> None:
+        """
+        Register a known speaker's voice
+        
+        Args:
+            name: Speaker name (must match one of the keys in speaker_embeddings)
+            audio_sample: numpy array of audio data (16kHz mono)
+        """
+        if name not in self.speaker_embeddings:
+            raise ValueError(f"Unknown speaker name: {name}")
+            
+        embedding = self.compute_speaker_embedding(audio_sample)
+        self.speaker_embeddings[name] = embedding
+        print(f"Registered voice profile for {name}")
+
