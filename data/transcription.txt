@@ -1,4 +1,32 @@
-[23:05:44] I have trouble with reading. Between June and December 2021, we worked with Autoblogs, an awesome startup that allows you to turn websites and articles into audiobooks.
-[23:05:59] using neural network driven text to speech. They provided audio versions of our first lesson as a free preview, then charged a small monthly fee to access the others to help with their bandwidth costs. Since then, we've amicably ended that partnership. You should still check.
-[23:06:14] them out, but worry not. We've implemented the feature ourselves and are providing it completely free. We're going to keep an eye on how much it costs to provide, but we would like to keep it free into the future, if it continues to be feasible to do so. So, feel free to click the
-[23:06:29] with draw a box button at the top of each article to have the content read to you. You can also hit the little play button on the right of each bookmarkable section, or use the bookmarks right on the player to jump to a specific section. So if you've read through all of lesson 0, are ready to follow the instructions.
+[02:26:43] terabytes at PCIe Gen4 speeds in the form factor of a gum stick.
+[02:26:58] coming from the CPU, or the ones coming from the motherboard chipset.
+[02:27:13] It doesn't really matter.
+[02:27:28] but that was all a big lie.
+[02:27:43] BK Quantum Delta Squared Tech, a 500 plus dollar water block, nay, water block system.
+[02:27:58] 210 watt thermoelectric cooling module.
+[02:28:13] insurance. Here's the thing about that, while your CPU can get so cold with this.
+[02:28:28] only the case when you're sitting at idle.
+[02:28:43] of 300 watts, which introduces two problems.
+[02:28:58] is that this Peltier module can only move 210 watts.
+[02:29:13] because that would be rude.
+[02:29:28] And the reason is that I'm not just gonna goop this stuff on here if I'm gonna pay for the most expensive.
+[02:29:43] it comes with a card I'm a card-carrying nerd now it has peels it has peels so.
+[02:29:58] Holy schnikes, this is actually a thing.
+[02:30:13] This block is the gift that keeps giving.
+[02:30:28] for your thermal sensors, your RGB.
+[02:30:43] maybe two cores to boost as high as possible.
+[02:30:58] Now with the back plate, the mounting posts,.
+[02:31:13] I should go get it.
+[02:31:28] Machined from a solid piece of aluminum with brass end cap and accent ring.
+[02:31:43] Second annoying thing to note, this is the controller module that handles tech power.
+[02:31:58] that it is only kicking in at full strength when it's needed.
+[02:32:43] It weighs 60 pounds empty you're not gonna be able to move this computer.
+[02:32:58] Oh, now that is going to have absolutely no trouble.
+[02:33:13] Sides for the size of this case it has shockingly little room to maneuver.
+[02:33:28] places to put radiators and we don't need that because our radiators are in.
+[02:33:43] dollars which Okay! strictly speaking is not the most expensive case that award.
+[02:33:58] Specification and they include actually a lot of what you need two.
+[02:34:13] these fittings that I guess all these are quick releases but they're threaded.
+[02:34:28] controller along with one strip I believe in the front and then some more.
+[02:34:43] Ugreen's RevoDock Pro 3.13.
+[02:34:58] you can easily expand your laptop.
