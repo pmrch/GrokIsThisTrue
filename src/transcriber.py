@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-import pyaudio, librosa, numpy as np
-import torch, torch.nn.functional as F
+from typing import Dict, Optional
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+import pyaudio, librosa
 import threading, queue, difflib, os, re
 import warnings, speechbrain as sb
 
-from typing import Dict, Optional, Union, List, Tuple
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 from dotenv import load_dotenv
 from pyannote.audio import Pipeline
@@ -47,8 +50,11 @@ class Transcriber:
         self.transcription_queue = queue.Queue()
         
         # === Whisper Initialization ===
-        self.whisper_model = WhisperModel("distil-large-v3", device="cuda" if torch.cuda.is_available() else "cpu", 
-                                          compute_type="int8_float16" if torch.cuda.is_available() else "int8")
+        self.whisper_model = WhisperModel(
+            "large-v3",  # Upgrade from distil-large-v3 to large-v3
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            compute_type="float16" if torch.cuda.is_available() else "int8"  # Use float16 on GPU for better accuracy
+        )
         self.batched_model = BatchedInferencePipeline(model=self.whisper_model)
         
         # === Diarization Initialization ===
@@ -64,11 +70,19 @@ class Transcriber:
         
         # === Speaker Recognition Initialization ===
         try:
+            # Initialize without custom hparams
             self.speaker_recognizer = EncoderClassifier.from_hparams(
                 source="speechbrain/spkrec-ecapa-voxceleb",
                 savedir="pretrained_models/spkrec-ecapa-voxceleb",
-                run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
+                run_opts={
+                    "device": "cuda" if torch.cuda.is_available() else "cpu",
+                    "weights_only": False  # Add this line to handle PyTorch 2.6+ changes
+                }
             )
+            
+            # Set model to evaluation mode
+            self.speaker_recognizer.eval() # type: ignore
+            
         except Exception as e:
             print(f"Failed to initialize speaker recognition: {e}")
             self.speaker_recognizer = None
@@ -85,7 +99,7 @@ class Transcriber:
         
     def load_speaker_samples(self) -> None:
         """Load and register speaker samples from the data/speaker_samples directory"""
-        samples_dir = os.path.join("data", "speaker_samples")
+        samples_dir = os.path.join("data", "speaker_samples", "downsampled")
         os.makedirs(samples_dir, exist_ok=True)
         
         speakers = {
@@ -361,32 +375,62 @@ class Transcriber:
             
         with torch.no_grad():
             try:
-                # Ensure audio is long enough to avoid std() warning
-                min_samples = int(sample_rate * 0.5)  # At least 0.5 seconds
+                # Ensure audio is long enough
+                min_samples = int(sample_rate * 1.0)  # Only 0.5 seconds minimum
                 if len(audio_array) < min_samples:
                     padded_audio = np.pad(audio_array, (0, min_samples - len(audio_array)))
                     audio_array = padded_audio
 
-                embeddings = self.speaker_recognizer.encode_batch(torch.tensor(audio_array).unsqueeze(0))
-                return F.normalize(embeddings, dim=2)
+                # Convert to tensor and move to same device as model
+                device = next(self.speaker_recognizer.parameters()).device
+                audio_tensor = torch.tensor(audio_array, dtype=torch.float32).unsqueeze(0).to(device)
+                
+                # Get embedding
+                embeddings = self.speaker_recognizer.encode_batch(audio_tensor)
+                
+                # Normalize embedding (keep on GPU)
+                embedding = F.normalize(embeddings.squeeze(), dim=0)
+                
+                return embedding  # Keep on GPU
+                
             except Exception as e:
                 print(f"Error computing speaker embedding: {e}")
                 return None
-    
+
     def match_speaker(self, embedding: Optional[torch.Tensor]) -> str:
-        if embedding is None or not any(self.speaker_embeddings.values()):
+        if embedding is None:
+            return self.prev_transcription_speaker or "Unknown"
+        
+        # Check if we have any valid stored embeddings
+        valid_embeddings = {k: v for k, v in self.speaker_embeddings.items() if v is not None}
+        if not valid_embeddings:
             return "Unknown"
         
         max_similarity = -1
         matched_speaker = "Unknown"
         
-        for speaker, stored_embedding in self.speaker_embeddings.items():
+        # Get device of input embedding
+        device = embedding.device
+        
+        # Compare with stored embeddings
+        for speaker, stored_embedding in valid_embeddings.items():
             if stored_embedding is not None:
-                similarity = F.cosine_similarity(embedding, stored_embedding)
-                if similarity > max_similarity and similarity > 0.75:  # Threshold
-                    max_similarity = similarity
+                # Move stored embedding to same device if needed
+                stored_embedding = stored_embedding.to(device)
+                similarity = F.cosine_similarity(
+                    embedding.unsqueeze(0), 
+                    stored_embedding.unsqueeze(0)
+                )
+                
+                current_similarity = similarity.item()
+                if current_similarity > max_similarity and current_similarity > 0.65: # Too strict threshold
+                    max_similarity = current_similarity
                     matched_speaker = speaker
-                    
+
+        # If similarity is too low, keep previous speaker
+        if max_similarity < 0.65 and self.prev_transcription_speaker:
+            return self.prev_transcription_speaker
+            
         return matched_speaker
     
     def register_speaker(self, name: str, audio_sample: np.ndarray) -> None:
