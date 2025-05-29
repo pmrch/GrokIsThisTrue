@@ -7,7 +7,8 @@ import torch.nn.functional as F
 import pyaudio, librosa
 import threading, queue, difflib, os, re
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
+from time import sleep
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 from dotenv import load_dotenv
@@ -172,14 +173,14 @@ class Transcriber:
     def _transcribe_audio(self):
         while True:
             if not self.audio_queue.empty():
-                timestamp, audio_data = self.audio_queue.get()
+                chunk_timestamp, audio_data = self.audio_queue.get()
                 
                 # Convert stereo to mono
                 audio_np = np.frombuffer(audio_data, dtype=np.int16)
                 if self.CHANNELS == 2:
                     audio_np = audio_np.reshape(-1, 2)[:, 0]
                     
-                # Normalize and resample
+                # Normalize audio volume to avoid clipping and resample to 16KHz
                 audio_float = audio_np.astype(np.float32) / 32768.0
                 audio_float = np.clip(audio_float / np.max(np.abs(audio_float) + 1e-10), -1.0, 1.0)
                 audio_resampled = librosa.resample(audio_float, orig_sr=self.RATE, target_sr=16000.0)
@@ -192,29 +193,48 @@ class Transcriber:
                         vad_parameters=dict(threshold=0.8, min_silence_duration_ms=500)
                     )
                     
-                    formatted_lines = []
-                    seen_texts = set()
+                    # Align transcription with segments
+                    raw_lines = []
+                    seen_texts = set()  # Track unique texts to avoid duplicates
                     
                     for seg in segments:
-                        text = seg.text.strip()
-                        if text and text not in seen_texts:
+                        if seg.text.strip():
+                            text = seg.text.strip()
+                            if text in seen_texts:
+                                continue
                             seen_texts.add(text)
-                            deduped_text = self.dedupe_overlap(self.prev_transcription, text)
                             
+                            # Calculate segment-specific timestamp
+                            segment_time = chunk_timestamp + timedelta(seconds=seg.start)
+                            
+                            deduped_text = self.dedupe_overlap(self.prev_transcription, text)
                             if deduped_text.strip():
                                 self.prev_transcription = text
-                                formatted_line = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {deduped_text}"
-                                formatted_lines.append(formatted_line)
-                
-                    if formatted_lines:
-                        self.transcription_queue.put((timestamp, "\n".join(formatted_lines)))
+                                formatted_line = f"[{segment_time.strftime('%Y-%m-%d %H:%M:%S')}] {deduped_text}"
+                                raw_lines.append((segment_time, formatted_line))
+                                
+                    if raw_lines:
+                        # Sort by timestamp before writing
+                        raw_lines.sort(key=lambda x: x[0])
+                        formatted_lines = [line for _, line in raw_lines]
+                        
+                        self.transcription_queue.put((chunk_timestamp, "\n".join(formatted_lines)))
                         os.makedirs("data", exist_ok=True)
                         
                         with open("data/transcription.txt", "at", encoding="utf-8", errors="ignore") as file:
                             file.write("\n".join(formatted_lines) + "\n")
                             
-                except Exception as e:
+                except RuntimeError as e:
                     print(f"Transcription error: \n{e}")
+                    if "CUDA out of memory" in str(e):
+                        print("CUDA memory error. Try reducing batch_size or using a smaller model.")
+                        
+                except Exception as e:
+                    print(f"Unexpected error \n{e}")
+                    
+            else:
+                # If queue is empty, sleep to prevent CPU spinning
+                sleep(0.25)
 
     # Get latest transcription within time window
     def get_latest_transcription(self, max_age_seconds=30):
