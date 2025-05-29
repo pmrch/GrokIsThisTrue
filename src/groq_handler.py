@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os, re
 
 from dotenv import load_dotenv
@@ -13,15 +14,29 @@ if not api_key:
     raise ValueError("Missing GROQ_API_KEY environment variable.")
 client = Groq(api_key = api_key)
 
-PROMPT_PATTERN = re.compile(r"@grok(?:ai1)?[, ]*is (?:this|that) true\??", re.IGNORECASE)
+# Configuration for the API request
+CONFIG = {
+    "MAX_TOKENS": 125,
+    "MODEL": "llama-3.3-70b-versatile",
+    "PROMPT_PATTERN": re.compile(r"@grok(?:ai1)?[, ]*is (?:this|that) true\??", re.IGNORECASE),
+}
 
-# Predefine character limti
-MAX_TOKENS = 125
-
-def handle_groq_query(system_prompt: str, query: str, user_name: str) -> str:
+def handle_groq_query(system_prompt: str, query: str, user_name: str, allow_unmatched: bool = True) -> str:
+    """
+    Sends a cleaned and reformatted query to the Groq API based on Twitch chat input.
+    
+    Args:
+        system_prompt (str): The base system instruction for the AI.
+        query (str): Raw chat message from the user.
+        user_name (str): Twitch username of the message sender.
+        
+    Returns:
+        str: AI response or error string.
+    """
+    
     cleaned_query = str()
     
-    match = PROMPT_PATTERN.search(query)
+    match = CONFIG["PROMPT_PATTERN"].search(query)
     if not match:
         print("Pattern not matched in query. Sending raw content.")
         cleaned_query = query
@@ -41,13 +56,14 @@ def handle_groq_query(system_prompt: str, query: str, user_name: str) -> str:
                 "name": user_name,
             }
         ], 
-        model="llama-3.3-70b-versatile",
-        max_completion_tokens=MAX_TOKENS)
+        model=CONFIG["MODEL"],
+        max_completion_tokens=CONFIG["MAX_TOKENS"])
         
         return f"{chat_completion.choices[0].message.content}"
     
     except (IndexError, AttributeError) as e:
-        return f"Groq response parsing failed: {e}"
+        print(f"[ERROR] Response parsing issue: {e}")
+        return "Couldn't understand Groq's reply this time, sorry."
     
     except Exception as e:
         return f"Unexpected error encountered.\n{e}"
