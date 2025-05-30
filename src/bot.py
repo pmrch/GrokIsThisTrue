@@ -54,6 +54,10 @@ class Bot(commands.Bot):
         if message.echo:
             return
         
+        async with aiofiles.open(self.chatlog_file, "a", encoding = "utf-8", errors = "ignore") as log:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            await log.write(f"[{timestamp}] {message.author.name}: {message.content}\n")
+        
         matching = re.search(pattern = self.pattern, string = str(message.content).lower())
         if matching:
             base_line, closest_line = await self.select_context(self.pattern)
@@ -65,7 +69,3 @@ class Bot(commands.Bot):
                 user_name = str(message.author.name)
             )
             await message.channel.send(f"Hello @{message.author.name}. {response}")
-        
-        async with aiofiles.open(self.chatlog_file, "a", encoding = "utf-8", errors = "ignore") as log:
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            await log.write(f"[{timestamp}] {message.author.name}: {message.content}\n")
