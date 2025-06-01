@@ -38,18 +38,18 @@ async def select_context(pattern):
             _, _, closest_line = find_closest_line(target_ts, file1_lines)
 
             # Debug logging
-            async with aiofiles.open("data/debug.txt", "a", encoding="utf-8") as debug:
+            async with aiofiles.open("data/logs/debug.txt", "a", encoding="utf-8") as debug:
                 await debug.write(f"Base line: {base_line}\n")
                 await debug.write(f"Closest line: {closest_line}\n\n")
 
             return base_line, closest_line
         else:
-            async with aiofiles.open("data/debug.txt", "a", encoding="utf-8") as debug:
+            async with aiofiles.open("data/logs/debug.txt", "a", encoding="utf-8") as debug:
                 await debug.write("No line matched pattern in file2\n")
 
             return None, None
 
-async def load_file_lines_async(file_path):
+async def load_file_lines_async(file_path: str):
     async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
         return await f.readlines()
 

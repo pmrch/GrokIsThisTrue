@@ -1,3 +1,0 @@
-[2025-05-31 23:59:33] DEBUG - Starting new HTTPS connection (1): huggingface.co:443
-[2025-05-31 23:59:33] DEBUG - https://huggingface.co:443 "GET /api/models/Systran/faster-distil-whisper-large-v3/revision/main HTTP/1.1" 200 3167
-[2025-05-31 23:59:36] INFO - \U0001f399\ufe0f Recording started...

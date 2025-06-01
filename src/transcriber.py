@@ -79,10 +79,13 @@ class Transcriber:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         
+        # === Define a baseline timestamp ===
+        self.recording_start_time: datetime = datetime.now()
+        
         # === Set up Queues ===
         self.audio_queue: Queue[bytes] = Queue(maxsize=400)
-        self.voiced_queue: Queue[npt.NDArray[np.float32]] = Queue(maxsize=400)
-        self.transcription_queue: Queue[Tuple[str, str]] = Queue(maxsize=200)
+        self.voiced_queue: Queue[Tuple[npt.NDArray[np.float32], float, datetime]] = Queue(maxsize=400)
+        self.transcription_queue: Queue[Tuple[datetime, str, float]] = Queue(maxsize=200)
         
         # === Set up Faster Whisper === 
         self.whisper_model = WhisperModel(
@@ -233,6 +236,7 @@ class Transcriber:
         silence_threshold = 1.5  # Seconds of silence to consider as break
         frame_duration_s  = 0.02  # 20ms frames
         voiced_frames: List[bytes] = []
+        first_frame_ts = None
         
         while True:
             if not self.audio_queue.empty():
@@ -240,24 +244,47 @@ class Transcriber:
                 
                 # Slice the raw bytes into 20ms frames for VAD
                 for frame in self.frame_generator(20, int16_audio, int(self.AUDIO_CONFIG["TARGET_RATE"])):
-                    if self.vad.is_speech(frame.bytes, sample_rate=self.AUDIO_CONFIG["TARGET_RATE"]): # type: ignore
+                    if self.vad.is_speech(frame.data, sample_rate=self.AUDIO_CONFIG["TARGET_RATE"]): # type: ignore
                         voiced_frames.append(frame.data)
+                        
+                        if first_frame_ts is None:
+                            first_frame_ts = frame.timestamp
+                        
                         silence_duration = 0 # resets on speech
+                        
                     else:
                         if voiced_frames:
                             silence_duration += frame_duration_s
+                            
                             if silence_duration >= silence_threshold:
                                 # Flush voiced_frames as one chunk
                                 voiced_audio = b''.join(voiced_frames)
                                 
-                                try:
-                                    self.voiced_queue.put(self.bytes_to_float32(voiced_audio), block=False)
-                                except Full:
-                                    logging.warning("Failed putting audio into voiced_queue, queue is full.")
-                                except Exception as e:
-                                    logging.error(f"Unexpected error while putting to voiced_queue: {e}")
+                                # Calculate clip duration
+                                duration = len(voiced_frames) * frame_duration_s
                                 
-                    
+                                if first_frame_ts is not None:
+                                    # Define start of audio chunk
+                                    chunk_start_dt = self.recording_start_time + timedelta(seconds=first_frame_ts) # type: ignore
+                                    
+                                    try:
+                                        self.voiced_queue.put((self.bytes_to_float32(voiced_audio), duration, chunk_start_dt), block=False)
+                                        
+                                    except Full:
+                                        logging.warning("Failed putting audio into voiced_queue, queue is full.")
+                                        
+                                    except Exception as e:
+                                        logging.error(f"Unexpected error while putting to voiced_queue: {e}")
+                                    
+                                    finally:
+                                        voiced_frames.clear()
+                                        silence_duration = 0
+                                        first_frame_ts = None
+                                else:
+                                    logging.warning("first_frame_ts was None, skipping voiced chunk")
+                                    voiced_frames.clear()
+                                    silence_duration = 0
+                                    first_frame_ts = None
         
     # === Transcriber Thread === 
     def _transcribe_audio(self):
@@ -274,24 +301,46 @@ class Transcriber:
         while True:
             if not self.voiced_queue.empty():
                 # Read audio queue for timestamp and buffer
-                audio_chunk: npt.NDArray[np.float32] = self.voiced_queue.get()
+                audio_chunk, duration, chunk_start_time = self.voiced_queue.get()
+                audio_chunk: npt.NDArray[np.float32]
                 
                 # Start transcription
                 try:
                     segments, _ = self.batched_model.transcribe( # type: ignore
                         audio=audio_chunk,                        
                         beam_size=4,
-                        batch_size=4
+                        batch_size=8
                     )
-                    
-                    raw_lines: List[str] = []
                     
                     for seg in segments:
                         if seg.text.strip():
                             text = seg.text.strip()
                             
-                            # Calculate
-                            
+                            if text:
+                                # Put timestamp and text in the transcription queue
+                                try:
+                                    self.transcription_queue.put((chunk_start_time, text, duration), block=False)
+                                    with open("data/transcription.txt", "at", encoding="utf-8", errors="ignore") as tc:
+                                        tc.write(f"[{chunk_start_time.strftime("%Y-%m-%d %H:%M:%S")}] Transcription: {text}\n")
+                                
+                                except Full:
+                                    logging.warning("transcription_queue full, dropping transcription")
                     
                 except Exception as e:
                     logging.error(f"Error during transcription:\n{e}")
+                    
+    def get_latest_transcription(self) -> Optional[Tuple[datetime, str, float]]:
+        """
+        Retrieves the most recent transcription from the transcription_queue.
+        If no transcription is available, returns None.
+        """
+        
+        latest = None
+        try:
+            while True:
+                # Keep popping until queue is empty
+                latest = self.transcription_queue.get_nowait()
+        except Exception:
+            pass
+        
+        return latest
