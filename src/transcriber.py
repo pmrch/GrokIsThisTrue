@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 # Audio-related imports
 import numpy as np
-import librosa
-import sounddevice as sd
-import webrtcvad
+import sounddevice as sd # type: ignore
+import webrtcvad    # type: ignore
+from librosa import resample as librosa_resample # type: ignore
 
 # Misc imports
 import os, logging
 import warnings
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta # type: ignore
 
 # Thread-related imports
 from queue import Queue, Full
@@ -17,10 +17,12 @@ from threading import Thread
 
 # Static typing imports
 from numpy import typing as npt
+from typing import List, Tuple, Dict, Generator, Any, Union, Optional # type: ignore
+from dataclasses import dataclass
 
 # Transcription-specific imports
 import torch
-from faster_whisper import WhisperModel, BatchedInferencePipeline
+from faster_whisper import WhisperModel, BatchedInferencePipeline # type: ignore
 
 
 # Suppress specific warnings
@@ -28,17 +30,20 @@ warnings.filterwarnings("ignore", category=UserWarning, module="speechbrain")
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch.cuda.amp")
 warnings.filterwarnings("ignore", category=UserWarning, module="pyannote.audio.models.blocks.pooling")
 
-class Frame(object):
+# Set up custom types
+AudioConfig = Dict[str, int | str | float]
+MiscConfig = Dict[str, str]
+
+@dataclass
+class Frame:
     """Represents a "frame" of audio data."""
-    def __init__(self, bytes, timestamp, duration):
-        self.bytes = bytes
-        self.timestamp = timestamp
-        self.duration = duration
+    data: bytes
+    timestamp: Union[datetime, float]
+    duration: float
 
 class Transcriber:
     def __init__(self):
-        """
-        Initialize the Transcriber instance.
+        """Initialize the Transcriber instance.
 
         Loads environment variables, sets up audio and miscellaneous configurations,
         initializes the audio buffer, and configures logging to write to a file.
@@ -48,7 +53,7 @@ class Transcriber:
         load_dotenv()
         
         # === Audio configuration global variables ===
-        self.AUDIO_CONFIG = {
+        self.AUDIO_CONFIG: AudioConfig = {
             "ORIG_RATE": 48000,
             "TARGET_RATE" : 16000,
             "CHANNELS": 2,
@@ -58,24 +63,26 @@ class Transcriber:
         }
         
         # === Miscellanious config ===
-        self.CONFIG = {
+        self.CONFIG: MiscConfig = {
             "LOG_DIR": "data/logs",
         }
         
-        # Configure logging
+        # === Configure logging ===
         os.makedirs(self.CONFIG["LOG_DIR"], exist_ok=True)
         self.CONFIG["LOG_FILE"] = os.path.join(self.CONFIG["LOG_DIR"], "program.log")
         
         logging.basicConfig(
             level=logging.DEBUG,
             filename=self.CONFIG["LOG_FILE"],
+            encoding="utf-8",
             format="[%(asctime)s] %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         
         # === Set up Queues ===
-        self.audio_queue = Queue(maxsize=100)
-        self.transcription_queue = Queue(maxsize=100)
+        self.audio_queue: Queue[bytes] = Queue(maxsize=400)
+        self.voiced_queue: Queue[npt.NDArray[np.float32]] = Queue(maxsize=400)
+        self.transcription_queue: Queue[Tuple[str, str]] = Queue(maxsize=200)
         
         # === Set up Faster Whisper === 
         self.whisper_model = WhisperModel(
@@ -85,16 +92,23 @@ class Transcriber:
         )
         self.batched_model = BatchedInferencePipeline(self.whisper_model)
         
+        # === Set up VAD ===
+        self.vad = webrtcvad.Vad(2)
+        
     # === Define the main Threads and processes ===
     def start(self):
         Thread(target=self._record_audio, daemon=True).start()
         Thread(target=self._transcribe_audio, daemon=True).start()
         Thread(target=self._apply_vad, daemon=True).start()
     
+    # === Define function to convert int16 PCM to float32
+    def bytes_to_float32(self, mono_int16_bytes: bytes) -> npt.NDArray[np.float32]:
+        int16_array = np.frombuffer(mono_int16_bytes, dtype=np.int16)
+        return int16_array.astype(np.float32) / 32768.0
+    
     # === Set INPUT_DEVICE_INDEX to the proper one ===
     def set_input_device(self) -> int:
-        """
-        Automatically select the audio input device index.
+        """Automatically select the audio input device index.
 
         Scans available audio devices and returns the index of the device that has
         exactly 2 input channels and contains 'Voicemeeter Out B2' in its name.
@@ -103,8 +117,7 @@ class Transcriber:
         Returns:
             int: The index of the selected input device.
         """
-        
-        devices = sd.query_devices()
+        devices: (sd.DeviceList | dict[str, Any]) = sd.query_devices() # type: ignore
         
         for idx, device in enumerate(devices):
             device_dict = dict(device)
@@ -113,9 +126,8 @@ class Transcriber:
         return 0
         
     # === Define audio_callback for sounddevice ===
-    def audio_callback(self, indata: np.ndarray, frames: int, time, status):
-        """
-        Callback function for sounddevice InputStream.
+    def audio_callback(self, indata: npt.NDArray[np.int16], frames: int, time: Any, status: Any):
+        """Callback function for sounddevice InputStream.
 
         Called automatically when new audio data is available.
 
@@ -133,36 +145,42 @@ class Transcriber:
         """
               
         # indata shape: (frames, channels), int16
-        stereo_int16_48k: npt.NDArray[np.int16] = indata.copy()
+        stereo_int16_48k: npt.NDArray[np.int16] = indata.copy() # type: ignore
         
         # Convert int16 stereo -> float32 mono (left channel)
         mono_float_48k: npt.NDArray[np.float32] = stereo_int16_48k[:, 0].astype(np.float32) / 32768.0
         
         # Downsample to 16KHz
-        mono_16k: npt.NDArray[np.float32] = librosa.resample(
+        mono_16k: npt.NDArray[np.float32] = librosa_resample( # type: ignore
             mono_float_48k, 
-            orig_sr=self.AUDIO_CONFIG["ORIG_RATE"], 
-            target_sr=self.AUDIO_CONFIG["TARGET_RATE"]
+            orig_sr=float(self.AUDIO_CONFIG["ORIG_RATE"]), 
+            target_sr=float(self.AUDIO_CONFIG["TARGET_RATE"])
         )
         
         # Convert float32 mono 16kHz -> int16 for VAD
         mono_16k_int16: bytes = (mono_16k * 32768).astype(np.int16).tobytes()
         
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Append to buffer
         try:
-            self.audio_queue.put((timestamp, mono_16k, mono_16k_int16))
+            self.audio_queue.put(mono_16k_int16)
         except Full:
-            logging.warning("Audio queue full. Dropping audio chunk.")
+            logging.warning("audio_queue full. Dropping audio chunk.")
+        except Exception as e:
+            logging.error(f"Failed putting audio data into audio_queue\nError: [{e}]")
             
     # === Split frames for VAD ===
-    def frame_generator(self, frame_duration_ms, audio, sample_rate):
+    def frame_generator(self, frame_duration_ms: int, audio: bytes, sample_rate: int) -> Generator[Frame, None, None]:
         """Generates audio frames from PCM audio data.
 
         Takes the desired frame duration in milliseconds, the PCM data, and
         the sample rate.
 
-        Yields Frames of the requested duration.
+        Yields Frames of the requested duration. Yield is just like return, just it doesn't
+        restart, rather it pauses and continues from where it left yielded a result. The reason
+        for not using return is that it would exit the thread.
+        
+        Which in our case means a Frame is a 20ms long segment, with timestamp and size in
+        bytes.
         """
         
         # Calculate how many bytes correspond to the frame duration
@@ -177,7 +195,6 @@ class Transcriber:
             yield Frame(audio[offset:offset + frame_byte_size], timestamp, frame_duration)
             timestamp += frame_duration
             offset += frame_byte_size
-        
         
     # === Recorder Thread ===
     def _record_audio(self):
@@ -195,7 +212,7 @@ class Transcriber:
             channels=self.AUDIO_CONFIG["CHANNELS"],
             dtype=self.AUDIO_CONFIG["FORMAT"],
             blocksize=self.AUDIO_CONFIG["CHUNK"],
-            callback=self.audio_callback
+            callback=self.audio_callback # type: ignore
         )
         
         # Start the input stream
@@ -204,16 +221,47 @@ class Transcriber:
         
     # === VAD Thread ===
     def _apply_vad(self):
+        """Accumulate tiny frames into usable audio clips
+        
+        This function calls frame_generator() very frequently, concatenates the pieces
+        and assemble a whole few seconds long audio chunk, puts it into the voiced_queue,
+        since frame_generator() only yields voiced audio segments.
+        
+        
+        """
+        silence_duration = 0.0
+        silence_threshold = 1.5  # Seconds of silence to consider as break
+        frame_duration_s  = 0.02  # 20ms frames
+        voiced_frames: List[bytes] = []
+        
         while True:
             if not self.audio_queue.empty():
-                ts, float_audio, int16_audio = self.audio_queue.get()
+                int16_audio: bytes = self.audio_queue.get()
                 
                 # Slice the raw bytes into 20ms frames for VAD
+                for frame in self.frame_generator(20, int16_audio, int(self.AUDIO_CONFIG["TARGET_RATE"])):
+                    if self.vad.is_speech(frame.bytes, sample_rate=self.AUDIO_CONFIG["TARGET_RATE"]): # type: ignore
+                        voiced_frames.append(frame.data)
+                        silence_duration = 0 # resets on speech
+                    else:
+                        if voiced_frames:
+                            silence_duration += frame_duration_s
+                            if silence_duration >= silence_threshold:
+                                # Flush voiced_frames as one chunk
+                                voiced_audio = b''.join(voiced_frames)
+                                
+                                try:
+                                    self.voiced_queue.put(self.bytes_to_float32(voiced_audio), block=False)
+                                except Full:
+                                    logging.warning("Failed putting audio into voiced_queue, queue is full.")
+                                except Exception as e:
+                                    logging.error(f"Unexpected error while putting to voiced_queue: {e}")
+                                
+                    
         
     # === Transcriber Thread === 
     def _transcribe_audio(self):
-        """
-        Continuously processes audio chunks from the audio queue.
+        """Continuously processes audio chunks from the audio queue.
 
         Retrieves audio data with timestamps from `audio_queue`, processes it 
         (e.g. batching, formatting, or sending to a speech-to-text model), and
@@ -224,17 +272,26 @@ class Transcriber:
         """
         
         while True:
-            if not self.audio_queue.empty():
+            if not self.voiced_queue.empty():
                 # Read audio queue for timestamp and buffer
-                timestamp, audio_chunk = self.audio_queue.get()
+                audio_chunk: npt.NDArray[np.float32] = self.voiced_queue.get()
                 
                 # Start transcription
                 try:
-                    segments, _ = self.batched_model.transcribe(
-                        audio=audio_chunk,
+                    segments, _ = self.batched_model.transcribe( # type: ignore
+                        audio=audio_chunk,                        
                         beam_size=4,
                         batch_size=4
                     )
+                    
+                    raw_lines: List[str] = []
+                    
+                    for seg in segments:
+                        if seg.text.strip():
+                            text = seg.text.strip()
+                            
+                            # Calculate
+                            
                     
                 except Exception as e:
                     logging.error(f"Error during transcription:\n{e}")
