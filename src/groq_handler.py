@@ -4,6 +4,8 @@ import os, re
 from dotenv import load_dotenv
 from groq import Groq
 
+from typing import Dict, Any
+
 # Load Environment values
 load_dotenv()
 
@@ -15,7 +17,7 @@ if not api_key:
 client = Groq(api_key = api_key)
 
 # Configuration for the API request
-CONFIG = {
+CONFIG: Dict[str, Any] = {
     "MAX_TOKENS": 125,
     "MODEL": "llama-3.3-70b-versatile",
     "PROMPT_PATTERN": re.compile(r"@grok(?:ai1)?[, ]*is (?:this|that) true\??", re.IGNORECASE),
